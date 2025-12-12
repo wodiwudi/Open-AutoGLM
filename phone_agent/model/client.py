@@ -18,7 +18,9 @@ class ModelConfig:
     temperature: float = 0.0
     top_p: float = 0.85
     frequency_penalty: float = 0.2
-    extra_body: dict[str, Any] = field(default_factory=dict)
+    extra_body: dict[str, Any] = field(
+        default_factory=lambda: {"skip_special_tokens": False}
+    )
 
 
 @dataclass
@@ -63,7 +65,6 @@ class ModelClient:
             top_p=self.config.top_p,
             frequency_penalty=self.config.frequency_penalty,
             extra_body=self.config.extra_body,
-            stream=False,
         )
 
         raw_content = response.choices[0].message.content
@@ -77,43 +78,45 @@ class ModelClient:
         """
         Parse the model response into thinking and action parts.
 
-        Parsing rules:
-        1. If content contains 'finish(message=', everything before is thinking,
-           everything from 'finish(message=' onwards is action.
-        2. If rule 1 doesn't apply but content contains 'do(action=',
-           everything before is thinking, everything from 'do(action=' onwards is action.
-        3. Fallback: If content contains '<answer>', use legacy parsing with XML tags.
-        4. Otherwise, return empty thinking and full content as action.
-
         Args:
             content: Raw response content.
 
         Returns:
             Tuple of (thinking, action).
         """
-        # Rule 1: Check for finish(message=
-        if "finish(message=" in content:
-            parts = content.split("finish(message=", 1)
-            thinking = parts[0].strip()
-            action = "finish(message=" + parts[1]
-            return thinking, action
+        thinking = ""
+        action = content
 
-        # Rule 2: Check for do(action=
-        if "do(action=" in content:
-            parts = content.split("do(action=", 1)
-            thinking = parts[0].strip()
-            action = "do(action=" + parts[1]
-            return thinking, action
-
-        # Rule 3: Fallback to legacy XML tag parsing
+        # Case 1: Standard format with <answer> tag
         if "<answer>" in content:
             parts = content.split("<answer>", 1)
             thinking = parts[0].replace("<think>", "").replace("</think>", "").strip()
             action = parts[1].replace("</answer>", "").strip()
             return thinking, action
 
-        # Rule 4: No markers found, return content as action
-        return "", content
+        # Case 2: No <answer> tag but has </think>
+        if "</think>" in content:
+            parts = content.split("</think>", 1)
+            thinking = parts[0].replace("<think>", "").strip()
+            action = parts[1].strip()
+            return thinking, action
+
+        # Case 3: Mixed content (thinking + code) but no explicit tags or broken tags
+        # Try to find where the action starts (do( or finish()
+        import re
+        match = re.search(r"(.*?)(do\(|finish\()", content, re.DOTALL)
+        if match:
+            thinking = match.group(1).replace("<think>", "").strip()
+            # Reconstruct action part
+            action_start = match.group(2)
+            rest_of_content = content[match.end():]
+            action = (action_start + rest_of_content).strip()
+            if "</answer>" in action:
+                action = action.replace("</answer>", "").strip()
+            return thinking, action
+
+        # Case 4: No tags found, assume everything is action
+        return thinking, action
 
 
 class MessageBuilder:
